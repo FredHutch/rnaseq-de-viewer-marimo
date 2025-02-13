@@ -3,3 +3,5 @@ pandas
 plotly
 marimo
 urllib3
+anndata
+scikit-learn

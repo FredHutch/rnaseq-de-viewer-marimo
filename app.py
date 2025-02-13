@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.11.0"
+__generated_with = "0.11.2"
 app = marimo.App(width="medium", app_title="Marimo Viewer: Cirro")
 
 
@@ -15,10 +15,7 @@ def _():
     # Define the types of datasets which can be read in
     # This is used to filter the dataset selector, below
     cirro_dataset_type_filter = [
-        "process-hutch-differential-expression-1_0",
-        "process-hutch-differential-expression-custom-1_0",
-        "differential-expression-table",
-        "process-nf-core-differentialabundance-1_5"
+        "custom_files"
     ]
     return (cirro_dataset_type_filter,)
 
@@ -73,8 +70,10 @@ async def _(micropip, mo, running_in_wasm):
         from functools import lru_cache
         import base64
         from urllib.parse import quote_plus
+        from anndata import AnnData
+        import sklearn
 
-        from cirro import DataPortalLogin
+        from cirro import DataPortalLogin, DataPortalDataset
         from cirro.services.file import FileService
         from cirro.sdk.file import DataPortalFile
         from cirro.config import list_tenants
@@ -84,7 +83,9 @@ async def _(micropip, mo, running_in_wasm):
             from cirro.helpers import pyodide_patch_all
             pyodide_patch_all()
     return (
+        AnnData,
         BytesIO,
+        DataPortalDataset,
         DataPortalFile,
         DataPortalLogin,
         Dict,
@@ -100,6 +101,7 @@ async def _(micropip, mo, running_in_wasm):
         px,
         pyodide_patch_all,
         quote_plus,
+        sklearn,
         sleep,
     )
 
@@ -230,7 +232,7 @@ def _(id_to_name, mo, name_to_id, projects, query_params):
 
 
 @app.cell
-def _(cirro_dataset_type_filter, client, mo, project_ui):
+def _(client, mo, project_ui):
     # Stop if the user has not selected a project
     mo.stop(project_ui.value is None)
 
@@ -239,7 +241,7 @@ def _(cirro_dataset_type_filter, client, mo, project_ui):
     datasets = [
         dataset
         for dataset in client.get_project_by_id(project_ui.value).list_datasets()
-        if dataset.process_id in cirro_dataset_type_filter
+        # if dataset.process_id in cirro_dataset_type_filter
     ]
     return (datasets,)
 
@@ -257,63 +259,189 @@ def _(datasets, id_to_name, mo, name_to_id, query_params):
 
 
 @app.cell
-def _(client, dataset_ui, mo, project_ui):
-    # Stop if the user has not selected a dataset
-    mo.stop(dataset_ui.value is None)
+def _(
+    AnnData,
+    DataPortalDataset,
+    DataPortalFile,
+    Dict,
+    client,
+    dataset_ui,
+    pd,
+    project_ui,
+):
+    # Read the selected dataset from Cirro as an AnnData object
+    def read_de_andata(file: DataPortalFile, sample_meta: pd.DataFrame) -> AnnData:
+        # Read in as a TSV
+        df = file.read_csv(sep="\t")
 
-    # Get the list of files within the selected dataset
-    file_list = [
-        file.name
-        for file in (
-            client
-            .get_project_by_id(project_ui.value)
-            .get_dataset_by_id(dataset_ui.value)
-            .list_files()
+        # Use the GeneID as the unique index
+        df.set_index("GeneID", inplace=True)
+
+        # Find the columns which are sample readcounts
+        samples = [
+            cname for cname in df.columns
+            if cname in sample_meta.index
+        ]
+        assert len(samples) > 0, (df.columns, sample_meta.index)
+
+        return AnnData(
+            X=df.reindex(columns=samples).astype(int).values,
+            obs=df.drop(columns=samples),
+            var=sample_meta.reindex(index=samples)
         )
-    ]
-    return (file_list,)
 
+    class DE:
+        # Make a dedicated object that contains the complete readcounts, the DE results, and the sample metadata
 
-@app.cell
-def _(file_list, mo, query_params):
-    # Let the user select which file to get data from
-    file_ui = mo.ui.dropdown(
-        value=(query_params.get("file") if query_params.get("file") in file_list else None),
-        options=file_list,
-        on_change=lambda i: query_params.set("file", i)
-    )
-    file_ui
-    return (file_ui,)
+        ds: DataPortalDataset
 
+        # Sample metadata
+        meta: pd.DataFrame
 
-@app.cell
-def _(mo, query_params):
-    # Let the user provide information about the file format
-    sep_ui = mo.ui.dropdown(
-        ["comma", "tab", "space"],
-        value=query_params.get("sep", "comma"),
-        label="Field Separator"
-    )
-    sep_ui
-    return (sep_ui,)
+        # DE results: dict of AnnData objects
+        results: Dict[str, pd.DataFrame]
 
+        # Single table with counts for everything
+        counts: pd.DataFrame
 
-@app.cell
-def _(client, dataset_ui, file_ui, mo, project_ui, sep_ui):
-    # If the file was selected
-    mo.stop(file_ui.value is None)
+        # Counts-per-million
+        cpm: pd.DataFrame
 
-    # Read the table
-    df = (
+        # Find all of the different groups in the sample metadata
+        groups: list
+
+        def __init__(self, ds: DataPortalDataset):
+
+            self.ds = ds
+            self._files = ds.list_files()
+            self.read_meta()
+            self.read_de()
+            self.merge_counts()
+            self.calc_cpm()
+            self.infer_groups()
+
+        def read_meta(self):
+            # Read in the metadata file
+            self.meta = self._files.get_by_id("data/meta.tsv").read_csv(sep="\t").set_index("Sample")
+
+        def read_de(self):
+            # Load in all of the files with the name DE_all.tsv
+            # Each file will be loaded in as its own AnnData object,
+            # and we will give it an ID using the name of the folder it is inside of
+            self.results = {}
+            for file in self._files:
+                if file.name.split("/")[-1] == "DE_all.tsv":
+                    self.results[file.absolute_path.split("/")[-2]] = read_de_andata(file, self.meta)
+
+        def merge_counts(self):
+            # Make a single DataFrame with all samples and all genes
+            self.counts = pd.DataFrame(
+                index=list(set([
+                    i
+                    for adata in self.results.values()
+                    for i in adata.var_names
+                ])),
+                columns=list(set([
+                    i
+                    for adata in self.results.values()
+                    for i in adata.obs_names
+                ]))
+            )
+            # Populate the counts from each DE results
+            for adata in self.results.values():
+                # Iterate over each sample's data
+                for sample_name, readcounts in adata.to_df().items():
+                    self.counts.loc[sample_name, readcounts.index] = readcounts.values
+
+        def calc_cpm(self):
+            self.cpm = self.counts.apply(
+                lambda r: r / (r.sum() / 1e6),
+                axis=1
+            )
+
+        def infer_groups(self):
+            self.groups = list(set([
+                val
+                for _, cvals in self.meta.items()
+                for val in cvals.values
+            ]))
+
+    de = DE(
         client
         .get_project_by_id(project_ui.value)
         .get_dataset_by_id(dataset_ui.value)
-        .list_files()
-        .get_by_id(file_ui.value)
-        # Set the delimiter used to read the file based on the menu selection
-        .read_csv(sep=dict(comma=",", tab="\t", space=" ")[sep_ui.value])
     )
-    return (df,)
+    return DE, de, read_de_andata
+
+
+@app.cell(hide_code=True)
+def _(de, mo):
+    # Get the inputs for plotting PCA
+    pca_params = (
+        mo.md(
+    """
+    ### Options for Plotting PCA
+
+    - Sample Groups to Include: {sample_groups}
+    - Color By: {color_by}
+    """)
+        .batch(
+            sample_groups=mo.ui.multiselect(
+                options=de.groups,
+                value=de.groups
+            ),
+            color_by=mo.ui.dropdown(
+                options=de.meta.columns,
+                value=de.meta.columns.values[0]
+            )
+        )
+    )
+
+    pca_params
+    return (pca_params,)
+
+
+@app.cell
+def _(de, pca_params, pd, px, sklearn):
+    def plot_pca():
+        # Filter to the samples of interest
+        samples_to_include = list(set([
+            sample
+            for _, cvals in de.meta.items()
+            for sample, val in cvals.items()
+            if val in pca_params.value["sample_groups"]
+        ]))
+        assert len(samples_to_include) > 2, "Need at least 3 samples to plot"
+
+        # Get the gene counts for those samples
+        cpm = de.cpm.reindex(index=samples_to_include).fillna(0)
+
+        # Get the PCA coordinates
+        pca = sklearn.decomposition.PCA()
+        _coords = pca.fit_transform(cpm.values)
+        pca_coords = pd.DataFrame(
+            _coords,
+            index=cpm.index,
+            columns=[
+                f"PC{i+1} ({round(var_explained * 100, 1)}%)"
+                for i, var_explained in enumerate(pca.explained_variance_ratio_)
+            ]
+        ).assign(**{
+            pca_params.value["color_by"]: de.meta[pca_params.value["color_by"]]
+        })
+
+        fig = px.scatter(
+            pca_coords,
+            x=pca_coords.columns.values[0],
+            y=pca_coords.columns.values[1],
+            template="simple_white",
+            hover_name=pca_coords.index,
+            color=pca_params.value["color_by"]
+        )
+        return fig
+
+    plot_pca()
+    return (plot_pca,)
 
 
 @app.cell
