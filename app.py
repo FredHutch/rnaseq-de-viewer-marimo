@@ -51,6 +51,7 @@ async def _(micropip, mo, running_in_wasm):
             # Downgrade plotly to avoid the use of narwhals
             await micropip.install("plotly<6.0.0")
             await micropip.install("ssl")
+            await micropip.install("anndata")
             micropip.uninstall("urllib3")
             micropip.uninstall("httpx")
             await micropip.install(["urllib3==2.3.0"])
