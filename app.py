@@ -488,13 +488,14 @@ def _(mo):
 
 @app.cell
 def _(
+    mo,
     np,
-    px,
     select_comparison_ui,
     select_fdr_cutoff_ui,
     select_lfc_cutoff_ui,
 ):
-    def plot_volcano():
+    # Format the DE table
+    def format_de_table():
         adata = select_comparison_ui.value
         if adata is None:
             return
@@ -502,7 +503,7 @@ def _(
         fdr_cutoff = select_fdr_cutoff_ui.value
         lfc_cutoff = select_lfc_cutoff_ui.value
 
-        plot_df = (
+        return (
             adata.obs
             .assign(
                 neg_log10_pvalue=adata.obs['PValue'].apply(np.log10) * -1,
@@ -514,13 +515,25 @@ def _(
             )
         )
 
+    de_table = format_de_table()
+    mo.stop(de_table is None)
+    return de_table, format_de_table
+
+
+@app.cell
+def _(de_table, mo, px, select_fdr_cutoff_ui, select_lfc_cutoff_ui):
+    def plot_volcano():
+
+        fdr_cutoff = select_fdr_cutoff_ui.value
+        lfc_cutoff = select_lfc_cutoff_ui.value
+
         fig = px.scatter(
-            plot_df,
+            de_table,
             x="logFC",
             y="neg_log10_pvalue",
             template="simple_white",
             color="is_sig",
-            hover_data=["FDR"],
+            hover_data=["FDR", "GeneName"],
             hover_name="GeneName",
             labels=dict(
                 neg_log10_pvalue="p-value (-log10)",
@@ -529,10 +542,64 @@ def _(
             )
         )
 
-        return fig
+        return mo.ui.plotly(fig)
 
-    plot_volcano()
-    return (plot_volcano,)
+    volcano = plot_volcano()
+    volcano
+    return plot_volcano, volcano
+
+
+@app.cell
+def _(de_table, mo):
+    select_gene_ui = mo.ui.dropdown(
+        label="Select Gene:",
+        options=de_table.query("is_sig").sort_values("PValue").head(1000)["GeneName"].values
+    )
+    select_gene_ui
+    return (select_gene_ui,)
+
+
+@app.cell
+def _(px, select_comparison_ui, select_gene_ui):
+    def show_gene_abund():
+        adata = select_comparison_ui.value
+        if adata is None:
+            return
+
+        # If no gene was seletected, stop
+        if select_gene_ui.value is None:
+            return
+
+        # Get the gene ID from the gene name, pick the lowest pvalue if there are multiple
+        gene_id = (
+            adata.obs
+            .query(
+                f"GeneName == '{select_gene_ui.value}'"
+            )
+            .sort_values(by="PValue")
+            .head(1)
+            .index.values[0]
+        )
+
+        plot_df = (
+            adata.var
+            .assign(
+                abund=adata.to_df().loc[gene_id]
+            )
+        )
+        fig = px.box(
+            plot_df,
+            x="Group",
+            y="abund",
+            template="simple_white",
+            title=select_gene_ui.value,
+            labels=dict(abund="Expression Level")
+        )
+        return fig
+        
+
+    show_gene_abund()
+    return (show_gene_abund,)
 
 
 @app.cell
