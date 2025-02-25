@@ -445,6 +445,97 @@ def _(de, pca_params, pd, px, sklearn):
 
 
 @app.cell
+def _(mo):
+    mo.md(r"""### Differential Expression Results""")
+    return
+
+
+@app.cell
+def _(de, mo):
+    # User inputs which comparison to inspect
+    select_comparison_ui = mo.ui.dropdown(
+        label="Select Comparison:",
+        options=de.results
+    )
+    select_comparison_ui
+    return (select_comparison_ui,)
+
+
+@app.cell
+def _(mo):
+    select_fdr_cutoff_ui = mo.ui.number(
+        label="Cutoff - FDR:",
+        value=0.05,
+        start=0.,
+        stop=1.,
+        step=0.01
+    )
+    select_fdr_cutoff_ui
+    return (select_fdr_cutoff_ui,)
+
+
+@app.cell
+def _(mo):
+    select_lfc_cutoff_ui = mo.ui.number(
+        label="Cutoff - Absolute Log Fold Change:",
+        value=1,
+        start=0.,
+        step=0.1
+    )
+    select_lfc_cutoff_ui
+    return (select_lfc_cutoff_ui,)
+
+
+@app.cell
+def _(
+    np,
+    px,
+    select_comparison_ui,
+    select_fdr_cutoff_ui,
+    select_lfc_cutoff_ui,
+):
+    def plot_volcano():
+        adata = select_comparison_ui.value
+        if adata is None:
+            return
+
+        fdr_cutoff = select_fdr_cutoff_ui.value
+        lfc_cutoff = select_lfc_cutoff_ui.value
+
+        plot_df = (
+            adata.obs
+            .assign(
+                neg_log10_pvalue=adata.obs['PValue'].apply(np.log10) * -1,
+                is_sig=(
+                    (adata.obs['FDR'] <= fdr_cutoff)
+                    &
+                    (adata.obs["logFC"].abs() >= lfc_cutoff)
+                )
+            )
+        )
+
+        fig = px.scatter(
+            plot_df,
+            x="logFC",
+            y="neg_log10_pvalue",
+            template="simple_white",
+            color="is_sig",
+            hover_data=["FDR"],
+            hover_name="GeneName",
+            labels=dict(
+                neg_log10_pvalue="p-value (-log10)",
+                logFC="Fold Change (log2)",
+                is_sig=f"FDR <= {fdr_cutoff}<br>LFC >= {lfc_cutoff}"
+            )
+        )
+
+        return fig
+
+    plot_volcano()
+    return (plot_volcano,)
+
+
+@app.cell
 def _():
     return
 
