@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.11.2"
+__generated_with = "0.11.17"
 app = marimo.App(width="medium", app_title="Marimo Viewer: Cirro")
 
 
@@ -127,12 +127,7 @@ def _(list_tenants):
 
     def name_to_domain(name):
         return tenants_by_name.get(name, {}).get("domain")
-    return (
-        domain_to_name,
-        name_to_domain,
-        tenants_by_domain,
-        tenants_by_name,
-    )
+    return domain_to_name, name_to_domain, tenants_by_domain, tenants_by_name
 
 
 @app.cell
@@ -551,6 +546,25 @@ def _(de_table, mo, px, select_fdr_cutoff_ui, select_lfc_cutoff_ui):
 
 
 @app.cell
+def _(de_table, mo, px):
+    def pvalHisto():
+
+        fig = px.histogram(
+            de_table,
+            x="PValue",
+            template="simple_white",
+            nbins=20
+        )
+
+        return mo.ui.plotly(fig)
+
+    pHisto = pvalHisto()
+    pHisto
+    
+    return pHisto, pvalHisto
+
+
+@app.cell
 def _(de_table, mo):
     select_gene_ui = mo.ui.dropdown(
         label="Select Gene:",
@@ -597,15 +611,23 @@ def _(px, select_comparison_ui, select_gene_ui):
             labels=dict(abund="Expression Level")
         )
         return fig
-        
+
 
     show_gene_abund()
     return (show_gene_abund,)
 
 
 @app.cell
-def _():
-    return
+def _(mo):
+    num_genes_ui=mo.ui.number(
+        label="Number of Genes for Heatmap:",
+        value=200,
+        start=10,
+        step=1
+    )
+
+    num_genes_ui
+    return (num_genes_ui,)
 
 
 if __name__ == "__main__":
